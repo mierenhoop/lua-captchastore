@@ -1,8 +1,8 @@
-local captchastore = require "captchastore"
+local newcaptchastore = require "captchastore"
 
 describe("lua-captchastore", function()
   it("should work", function()
-    local store = captchastore.new("/tmp/test.db", "/tmp", 5)
+    local store = newcaptchastore("/tmp/test.db", 5)
 
     local token, image, answer = store:get()
 

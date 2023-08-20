@@ -4,13 +4,17 @@ local lsqlite3 = require "lsqlite3"
 
 --TODO: change assert to if err ~= nil then ...
 
+---@class captchastore
 local store = {}
 store.__index = store
 
 store.ETOKEN = "captchastore: token does not exist"
 store.EWRONG = "captchastore: provided answer is not correct"
 
-function store.new(dbname, imagedir, amount)
+---@param dbname string path to the cookiestore cache database
+---@param amount integer? defaults to 100. Amount of new captcha generated
+---@returns captchastore
+local function new(dbname, amount)
   assert(dbname and imagedir)
   local self = setmetatable({
     dbname = dbname,
@@ -34,6 +38,7 @@ function store.new(dbname, imagedir, amount)
   return self
 end
 
+---@private
 function store:opendb()
   local db = assert(lsqlite3.open(self.dbname))
   db:busy_timeout(1000)
@@ -45,6 +50,10 @@ function store:opendb()
   return db
 end
 
+---Get a random cached captcha
+---@return integer token ID which refers to a captcha
+---@return string image path of the captcha image file
+---@return string answer answer for the captcha
 function store:get()
   local db = self:opendb()
 
@@ -71,9 +80,14 @@ function store:get()
   assert(db:close() == lsqlite3.OK)
 end
 
+---Verify if the captcha has been solved
+---@param token integer
+---@param answer string
+---@return boolean, string? # one of the following error codes
+--- - `self.ETOKEN`
+--- - `self.EWRONG`
 function store:verify(token, answer)
   assert(token and answer)
-  token = tonumber(token)
   answer = string.upper(answer)
 
   local db = self:opendb()
@@ -104,6 +118,9 @@ function store:verify(token, answer)
   ]]
 end
 
+---Refresh the captcha cache, marks the old ones for removal,
+---they will still work until the next refresh, but will not be given out.
+---@param amount integer? amount of new captchas to be generated
 function store:refresh(amount)
   amount = amount or self.amount
   --regen captchas
@@ -162,6 +179,7 @@ convert -size 290x70 xc:$undercolor -bordercolor $bordercolor -border 5 \
 png:$outfile
 ]] --TODO: don't hardcode png
 
+---@private
 function store.generate(o)
   o = o or {}
   o.rotate = o.rotate or false
@@ -207,4 +225,4 @@ function store.generate(o)
   return o.outfile, table.concat(chars)
 end
 
-return store
+return new
