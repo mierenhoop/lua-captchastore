@@ -5,6 +5,9 @@ local lsqlite3 = require "lsqlite3"
 --TODO: change assert to if err ~= nil then ...
 
 ---@class captchastore
+---@field dbname string
+---@field imagedir string
+---@field amount integer
 local store = {}
 store.__index = store
 
@@ -14,13 +17,13 @@ store.EWRONG = "captchastore: provided answer is not correct"
 ---@param dbname string path to the cookiestore cache database
 ---@param amount integer? defaults to 100. Amount of new captcha generated
 ---@returns captchastore
-local function new(dbname, amount)
+function store.new(dbname, imagedir, amount)
   assert(dbname and imagedir)
-  local self = setmetatable({
-    dbname = dbname,
-    imagedir = imagedir,
-    amount = amount or 100,
-  }, store)
+  local self = setmetatable({}, store)
+
+  self.dbname = dbname
+  self.imagedir = imagedir
+  self.amount = amount or 100
 
   -- TODO: maybe use to-be-closed to make sure it will be closed
   -- also maybe have some db abstractions OR only support lsqlite3 v0.9.6+
@@ -28,7 +31,7 @@ local function new(dbname, amount)
 
   assert(db:exec[[
   CREATE TABLE IF NOT EXISTS token(captcha_id);
-  CREATE TABLE IF NOT EXISTS captcha(image, answer, mark);
+  CREATE TABLE IF NOT EXISTS captcha(image, answer, mark, uses);
   ]] == lsqlite3.OK)
 
   assert(db:close() == lsqlite3.OK)
@@ -38,14 +41,46 @@ local function new(dbname, amount)
   return self
 end
 
+local function prep(db, sql, ...)
+  local stmt = db:prepare(sql)
+  if not stmt then error(db:errmsg()) end
+  assert(stmt:bind_values(...) == lsqlite3.OK)
+  return stmt
+end
+
+local function exec(db, sql)
+  local ret = db:exec(sql)
+  if ret ~= lsqlite3.OK then error(db:errmsg()) end
+end
+
+local function urow(db, sql, ...)
+  local stmt = prep(db, sql, ...)
+  local rows = table.pack(stmt:urows()(stmt))
+  stmt:finalize()
+  return table.unpack(rows)
+end
+
+local function transaction(db, f)
+  exec(db, "BEGIN TRANSACTION;")
+
+  local ok, err = pcall(f)
+  if not ok then
+    exec(db, "ROLLBACK;")
+    error(err)
+  end
+
+  exec(db, "COMMIT;")
+end
+
+
 ---@private
 function store:opendb()
   local db = assert(lsqlite3.open(self.dbname))
   db:busy_timeout(1000)
-  assert(db:exec[[
+  exec(db, [[
   PRAGMA journal_mode=WAL;
   PRAGMA synchronous=NORMAL;
-  ]] == lsqlite3.OK)
+  ]])
 
   return db
 end
@@ -56,28 +91,26 @@ end
 ---@return string answer answer for the captcha
 function store:get()
   local db = self:opendb()
+  local token, captcha_id, image, answer
 
-  local token, image
-  for token, captcha_id in db:urows[[
+  transaction(db, function()
+    token, captcha_id = urow(db, [[
     INSERT INTO token
     SELECT rowid FROM captcha
-    WHERE NOT mark ORDER BY RANDOM() LIMIT 1
+    WHERE NOT mark
+    ORDER BY uses ASC, RANDOM()
+    LIMIT 1
     RETURNING rowid, captcha_id
-    ]] do
-    local stmt, err = db:prepare[[
-    SELECT image, answer
-    FROM captcha
+    ]])
+    image, answer = urow(db, [[
+    UPDATE captcha
+    SET uses = uses + 1
     WHERE rowid = ?
-    ]]
-    if not stmt then error(db:errmsg()) end
-    assert(stmt:bind_values(captcha_id) == lsqlite3.OK)
-    for image, answer in stmt:urows() do
-      assert(db:close() == lsqlite3.OK)
-      return token, image, answer
-    end
-    break
-  end
+    RETURNING image, answer
+    ]], captcha_id)
+  end)
   assert(db:close() == lsqlite3.OK)
+  return token, image, answer
 end
 
 ---Verify if the captcha has been solved
@@ -87,42 +120,30 @@ end
 --- - `self.ETOKEN`
 --- - `self.EWRONG`
 function store:verify(token, answer)
-  assert(token and answer)
   answer = string.upper(answer)
 
   local db = self:opendb()
 
-  local stmt, err = db:prepare[[
+  local prov, ans = urow(db, [[
   SELECT ?, answer
   FROM token
   INNER JOIN captcha ON captcha.rowid = captcha_id
   WHERE token.rowid = ?
-  ]]
-  if not stmt then error(db:errmsg()) end
-  assert(stmt:bind_values(answer, token) == lsqlite3.OK)
-  for prov, ans in stmt:urows() do
-    assert(db:close() == lsqlite3.OK)
-    if prov == ans then
-      return true
-    else
-      return false, store.EWRONG
-    end
-  end
-
+  ]], answer, token)
   assert(db:close() == lsqlite3.OK)
-  return false, store.ETOKEN
 
-  --[[
-  select captcha from token where value=token
-  delete from token where value = token
-  ]]
+  if not ans then return false, store.ETOKEN end
+
+  if prov == ans then
+    return true
+  else
+    return false, store.EWRONG
+  end
 end
 
 ---Refresh the captcha cache, marks the old ones for removal,
 ---they will still work until the next refresh, but will not be given out.
----@param amount integer? amount of new captchas to be generated
-function store:refresh(amount)
-  amount = amount or self.amount
+function store:refresh()
   --regen captchas
   local db = self:opendb()
 
@@ -135,25 +156,21 @@ function store:refresh(amount)
     oldfiles[#oldfiles+1] = file
   end
 
-  assert(db:exec"BEGIN TRANSACTION" == lsqlite3.OK)
+  transaction(db, function()
+    exec(db, [[
+    DELETE FROM captcha WHERE mark = 1;
+    UPDATE captcha SET mark = 1;
+    DELETE FROM token WHERE captcha_id NOT IN (SELECT rowid FROM captcha);
+    ]])
 
-  assert(db:exec[[
-  DELETE FROM captcha WHERE mark = 1;
-  UPDATE captcha SET mark = 1;
-  DELETE FROM token WHERE captcha_id NOT IN (SELECT rowid FROM captcha);
-  ]] == lsqlite3.OK)
-
-  local stmt, err = db:prepare"INSERT INTO captcha VALUES (?, ?, 0)"
-  if not stmt then error(db:errmsg()) end
-  for i = 1, amount do
-    local imagefile, answer = store.generate()
-
-    assert(stmt:bind_values(imagefile, answer) == lsqlite3.OK)
-    assert(stmt:step() == lsqlite3.DONE)
-    assert(stmt:reset() == lsqlite3.OK)
-  end
-
-  assert(db:exec"COMMIT" == lsqlite3.OK)
+    local dir = self.imagedir
+    local sep = string.sub(self.imagedir, -1, -1)
+    if sep~="/" and sep~="\\" then dir = dir .. "/" end
+    for i = 1, self.amount do
+      local imagefile, answer = store.generate(dir .. tostring(i)..".png")
+      urow(db, "INSERT INTO captcha VALUES (?, ?, 0, 0)", imagefile, answer)
+    end
+  end)
 
   for i = 1, #oldfiles do
     os.remove(oldfiles[i])
@@ -176,22 +193,21 @@ convert -size 290x70 xc:$undercolor -bordercolor $bordercolor -border 5 \
 -fill none -strokewidth 2 \
 -draw "bezier ${bx1},${by1} ${bx2},${by2} ${bx3},${by3} ${bx4},${by4}" \
 -draw "polyline ${bx4},${by4} ${bx5},${by5} ${bx6},${by6}" \
-png:$outfile
-]] --TODO: don't hardcode png
+$outfile
+]]
 
 ---@private
-function store.generate(o)
-  o = o or {}
-  o.rotate = o.rotate or false
-  o.skew = o.skew or true
-  o.angle = o.angle or 40
-  o.font = o.font or "TimesNewRoman"
-  o.pointsize = o.pointsize or 40
-  o.textcolor = o.textcolor or "black"
-  o.bordercolor = o.bordercolor or "black"
-  o.undercolor = o.undercolor or "white"
-  o.outfile = o.outfile or os.tmpname()
-  o.random = o.random or math.random
+function store.generate(name)
+  local o = {}
+  o.rotate = false
+  o.skew = true
+  o.angle = 40
+  o.font = "TimesNewRoman"
+  o.pointsize = 40
+  o.textcolor = "black"
+  o.bordercolor = "black"
+  o.undercolor = "white"
+  o.outfile = name
 
   local chars = {}
 
@@ -225,4 +241,4 @@ function store.generate(o)
   return o.outfile, table.concat(chars)
 end
 
-return new
+return store.new
