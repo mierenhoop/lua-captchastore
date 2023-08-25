@@ -29,7 +29,7 @@ function store.new(dbname, imagedir, amount)
   -- also maybe have some db abstractions OR only support lsqlite3 v0.9.6+
   local db = self:opendb()
 
-  assert(db:exec[[
+  assert(db:exec [[
   CREATE TABLE IF NOT EXISTS token(captcha_id);
   CREATE TABLE IF NOT EXISTS captcha(image, answer, mark, uses);
   ]] == lsqlite3.OK)
@@ -44,13 +44,14 @@ end
 local function prep(db, sql, ...)
   local stmt = db:prepare(sql)
   if not stmt then error(db:errmsg()) end
-  assert(stmt:bind_values(...) == lsqlite3.OK)
+  if stmt:bind_values(...) ~= lsqlite3.OK then
+    error(db:errmsg())
+  end
   return stmt
 end
 
 local function exec(db, sql)
-  local ret = db:exec(sql)
-  if ret ~= lsqlite3.OK then error(db:errmsg()) end
+  if db:exec(sql) ~= lsqlite3.OK then error(db:errmsg()) end
 end
 
 local function urow(db, sql, ...)
@@ -149,11 +150,11 @@ function store:refresh()
 
   local oldfiles = {}
 
-  for file in db:urows[[
+  for file in db:urows [[
     SELECT image FROM captcha
     WHERE mark = 1
     ]] do
-    oldfiles[#oldfiles+1] = file
+    oldfiles[#oldfiles + 1] = file
   end
 
   transaction(db, function()
@@ -165,10 +166,17 @@ function store:refresh()
 
     local dir = self.imagedir
     local sep = string.sub(self.imagedir, -1, -1)
-    if sep~="/" and sep~="\\" then dir = dir .. "/" end
+    if sep ~= "/" and sep ~= "\\" then dir = dir .. "/" end
     for i = 1, self.amount do
-      local imagefile, answer = store.generate(dir .. tostring(i)..".png")
-      urow(db, "INSERT INTO captcha VALUES (?, ?, 0, 0)", imagefile, answer)
+      local captcha_id = urow(db, [[
+      INSERT INTO captcha VALUES (NULL, NULL, 0, 0)
+      RETURNING rowid]])
+      local imagefile = dir .. captcha_id .. ".png"
+      local answer = store.generate(imagefile)
+      urow(db, [[
+      UPDATE captcha
+      SET image = ?, answer = ?
+      WHERE rowid = ?]], imagefile, answer, captcha_id)
     end
   end)
 
@@ -202,7 +210,7 @@ function store.generate(name)
   o.rotate = false
   o.skew = true
   o.angle = 40
-  o.font = "TimesNewRoman"
+  o.font = "Helvetica"
   o.pointsize = 40
   o.textcolor = "black"
   o.bordercolor = "black"
@@ -225,20 +233,23 @@ function store.generate(name)
     local r = math.random(-o.angle, o.angle)
     local s = math.random(-o.angle, o.angle)
 
-    local orr = (o.rotate and "rotate "..r or "") .. (o.skew and " skewX "..s or "")
+    local orr = (o.rotate and "rotate " .. r or "") .. (o.skew and " skewX " .. s or "")
 
-    local bx, by = 150 + 1.1*x, 40 + 2*y
+    local bx, by = 150 + 1.1 * x, 40 + 2 * y
 
-    o["xx"..i] = x
-    o["yy"..i] = y
-    o["or"..i] = orr
-    o["cc"..i] = char
-    o["bx"..i] = bx
-    o["by"..i] = by
+    o["xx" .. i] = x
+    o["yy" .. i] = y
+    o["or" .. i] = orr
+    o["cc" .. i] = char
+    o["bx" .. i] = bx
+    o["by" .. i] = by
   end
 
-  os.execute(string.gsub("2>/dev/null 1>&2 "..cmd, "%${?(%w+)}?", o))
-  return o.outfile, table.concat(chars)
+  local rdr = assert(io.popen(string.gsub("2>&1 " .. cmd, "%${?(%w+)}?", o), "r"))
+  local out = rdr:read("*a")
+  if out ~= "" then error("captchastore: generating captcha causes error: " .. out) end
+
+  return table.concat(chars)
 end
 
 return store.new
