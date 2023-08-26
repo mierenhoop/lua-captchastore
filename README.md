@@ -14,7 +14,8 @@ Dependencies:
 local newcaptchastore = require "captchastore"
 
 -- Initialize a capchastore with 200 cached captchas.
-local store = newcaptchastore("captchas.db", 200)
+-- It is assumed that the captchas directory exists.
+local store = newcaptchastore("captchas.db", "./captchas/", "200)
 
 -- Get a cached captcha.
 local token, imagepath, correct_answer = store:get()
@@ -30,6 +31,13 @@ if is_correct then -- Captcha completed
 elseif err == store.EWRONG then -- The wrong answer is provided
 elseif err == store.ETOKEN then -- The token does not exists anymore, request a new captcha
 end
+
+
+-- After some time, all captchas will have been solved,
+-- you should periodically remake all captchas.
+-- This method will create new captchas and remove the old.
+-- A captcha given will work before and after the next refresh.
+store:refresh()
 ```
 
 This project neither been licensed nor thoroughly tested yet, use at your own discretion.

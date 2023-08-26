@@ -103,12 +103,6 @@ function store:get()
     LIMIT 1
     RETURNING rowid, captcha_id
     ]])
-    image, answer = urow(db, [[
-    UPDATE captcha
-    SET uses = uses + 1
-    WHERE rowid = ?
-    RETURNING image, answer
-    ]], captcha_id)
   end)
   assert(db:close() == lsqlite3.OK)
   return token, image, answer
@@ -125,8 +119,8 @@ function store:verify(token, answer)
 
   local db = self:opendb()
 
-  local prov, ans = urow(db, [[
-  SELECT ?, answer
+  local prov, ans, captcha_id = urow(db, [[
+  SELECT ?, answer, captcha_id
   FROM token
   INNER JOIN captcha ON captcha.rowid = captcha_id
   WHERE token.rowid = ?
@@ -136,6 +130,12 @@ function store:verify(token, answer)
   if not ans then return false, store.ETOKEN end
 
   if prov == ans then
+    urow(db, [[
+    DELETE FROM token WHERE captcha_id = ?
+    ]], captcha_id)
+    urow(db, [[
+    UPDATE captcha SET uses = uses + 1 WHERE rowid = ?
+    ]], captcha_id)
     return true
   else
     return false, store.EWRONG
