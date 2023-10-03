@@ -15,7 +15,7 @@ local newcaptchastore = require "captchastore"
 
 -- Initialize a capchastore with 200 cached captchas.
 -- It is assumed that the captchas directory exists.
-local store = newcaptchastore("captchas.db", "./captchas/", "200)
+local store = newcaptchastore("captchas.db", "./captchas/", 200)
 
 -- Get a cached captcha.
 local token, imagepath, correct_answer = store:get()
