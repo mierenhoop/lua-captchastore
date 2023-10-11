@@ -92,18 +92,19 @@ end
 ---@return string answer answer for the captcha
 function store:get()
   local db = self:opendb()
-  local token, captcha_id, image, answer
 
-  transaction(db, function()
-    token, captcha_id = urow(db, [[
-    INSERT INTO token
-    SELECT rowid FROM captcha
-    WHERE NOT mark
-    ORDER BY uses ASC, RANDOM()
-    LIMIT 1
-    RETURNING rowid, captcha_id
-    ]])
-  end)
+  local captcha_id, image, answer = assert(urow(db, [[
+  SELECT rowid, image, answer FROM captcha
+  WHERE NOT mark
+  ORDER BY uses ASC, RANDOM()
+  LIMIT 1
+  ]]), "captchastore: no available captcha")
+
+  local token = assert(urow(db, [[
+  INSERT INTO token(captcha_id) VALUES (?)
+  RETURNING rowid
+  ]], captcha_id), "captchastore: could not create token")
+
   assert(db:close() == lsqlite3.OK)
   return token, image, answer
 end
@@ -119,25 +120,26 @@ function store:verify(token, answer)
 
   local db = self:opendb()
 
-  local prov, ans, captcha_id = urow(db, [[
-  SELECT ?, answer, captcha_id
+  local ans, captcha_id = urow(db, [[
+  SELECT answer, captcha_id
   FROM token
   INNER JOIN captcha ON captcha.rowid = captcha_id
   WHERE token.rowid = ?
-  ]], answer, token)
-  assert(db:close() == lsqlite3.OK)
+  ]], token)
 
   if not ans then return false, store.ETOKEN end
 
-  if prov == ans then
+  if answer == ans then
     urow(db, [[
     DELETE FROM token WHERE captcha_id = ?
     ]], captcha_id)
     urow(db, [[
     UPDATE captcha SET uses = uses + 1 WHERE rowid = ?
     ]], captcha_id)
+    assert(db:close() == lsqlite3.OK)
     return true
   else
+    assert(db:close() == lsqlite3.OK)
     return false, store.EWRONG
   end
 end
