@@ -77,11 +77,11 @@ end
 ---@private
 function store:opendb()
   local db = assert(lsqlite3.open(self.dbname))
-  db:busy_timeout(1000)
-  exec(db, [[
-  PRAGMA journal_mode=WAL;
-  PRAGMA synchronous=NORMAL;
-  ]])
+  --db:busy_timeout(1000)
+  --exec(db, [[
+  --PRAGMA journal_mode=WAL;
+  --PRAGMA synchronous=NORMAL;
+  --]])
 
   return db
 end
@@ -93,17 +93,19 @@ end
 function store:get()
   local db = self:opendb()
 
-  local captcha_id, image, answer = assert(urow(db, [[
+  local captcha_id, image, answer = urow(db, [[
   SELECT rowid, image, answer FROM captcha
   WHERE NOT mark
   ORDER BY uses ASC, RANDOM()
   LIMIT 1
-  ]]), "captchastore: no available captcha")
+  ]])
+  assert(captcha_id and image and answer, "captchastore: no available captcha")
 
-  local token = assert(urow(db, [[
+  local token = urow(db, [[
   INSERT INTO token(captcha_id) VALUES (?)
   RETURNING rowid
-  ]], captcha_id), "captchastore: could not create token")
+  ]], captcha_id)
+  assert(token, "captchastore: could not create token")
 
   assert(db:close() == lsqlite3.OK)
   return token, image, answer
@@ -131,8 +133,8 @@ function store:verify(token, answer)
 
   if answer == ans then
     urow(db, [[
-    DELETE FROM token WHERE captcha_id = ?
-    ]], captcha_id)
+    DELETE FROM token WHERE rowid = ?
+    ]], token)
     urow(db, [[
     UPDATE captcha SET uses = uses + 1 WHERE rowid = ?
     ]], captcha_id)
